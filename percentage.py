@@ -1,5 +1,5 @@
 import argparse
-
+# This module quantifies the percentage of every nucleotide in a sequence
 def nucleotide_percentage(sequence):
     sequence = sequence.upper()
     nucleotide_counts = {"A": 0, "T": 0, "G": 0, "C": 0}
