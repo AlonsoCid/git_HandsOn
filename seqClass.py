@@ -12,7 +12,7 @@ if len(sys.argv) == 1:
     sys.exit(1)
 
 args = parser.parse_args()
-
+# Transform the input sequence to uppercase
 args.seq = args.seq.upper() 
 if re.search('^[ACGUT]+$', args.seq): 
     if 'T' in args.seq and 'U' in args.seq:  # Added condition to check for the presence of both 'T' and 'U' in the sequence ensuring base exclusivity
