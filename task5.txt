@@ -1,0 +1,195 @@
+#Peaks from section 4: analyses/peaks.analysis/peaks.outside.sigmoid_colon.txt and analyses/peaks.analysis/peaks.outside.stomach.txt
+
+#Activate docker (repeat every restart)
+sudo docker run -v $PWD:$PWD -w $PWD --rm -it dgarrimar/epigenomics_course
+
+
+#Task 1: Create a folder regulatory_elements inside epigenomics_uvic. This will be the folder where you store all your subsequent results.
+
+mkdir -m 777 regulatory_elements
+mkdir -m 777 regulatory_elements/analyses
+
+
+#Task 2: Distal regulatory regions are usually found to be flanked by both H3K27ac and H3K4me1. From your starting catalogue of open regions in each tissue, select those that overlap peaks of H3K27ac AND H3K4me1 in the corresponding tissue. You will get a list of candidate distal regulatory elements for each tissue. How many are they? 13251 for colon and 12431 for stomach.
+
+##Download peak calling files
+for mod in H3K27ac H3K4me1 
+do
+    echo $mod
+    grep -F $mod ATAC-seq/metadata.tsv | \
+    grep -F "bigBed_narrowPeak" | \
+    grep -F "pseudoreplicated_peaks" | \
+    grep -F "GRCh38" | \
+    awk 'BEGIN{FS=OFS="\t"}{print $1, $11, $23}' | \
+    sort -k2,2 -k1,1r | \
+    sort -k2,2 -u > regulatory_elements/analyses/bigBed.$mod.peaks.ids.txt
+done
+
+cd regulatory_elements
+
+mkdir -m 777 data
+mkdir -m 777 data/bigBed.files
+mkdir -m 777 data/bed.files
+mkdir -m 777 analyses/peaks.analysis
+
+for mod in H3K27ac H3K4me1
+do
+    cut -f1 analyses/bigBed.$mod.peaks.ids.txt | \
+    while read filename; do
+        echo $filename
+        wget -P data/bigBed.files "https://www.encodeproject.org/files/$filename/@@download/$filename.bigBed"
+    done
+done
+
+##check download integrity
+md5sum data/bigBed.files/*.bigBed
+
+##Annotation file: ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed
+
+##Retrieve genes that fall outside gene coordinates
+##Convert bigBed files into BED files
+for file in H3K27ac H3K4me1
+do
+    cut -f1 analyses/bigBed."$file".peaks.ids.txt | \
+    while read filename; do
+        bigBedToBed data/bigBed.files/"$filename".bigBed data/bed.files/"$filename".bed
+    done
+done
+
+##Get peaks outside the body
+for file in H3K27ac H3K4me1
+do
+    cut -f-2 analyses/bigBed."$file".peaks.ids.txt | \
+    while read filename tissue; do 
+        bedtools intersect -a ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed -b data/bed.files/"$filename".bed | \
+        cut -f7 | \
+        sort -u > analyses/peaks.analysis/peaks.outside."$file"."$tissue".txt
+    done
+done
+
+##Get overlapping genes between H3K27ac and H3K4me1 for each tissue
+for tissue in sigmoid_colon stomach
+do
+    ../bin/selectRows.sh analyses/peaks.analysis/peaks.outside.H3K4me1."$tissue".txt analyses/peaks.analysis/peaks.outside.H3K27ac."$tissue".txt | \
+    cut -d "." -f1 > analyses/peaks.analysis/peaks.outside."$tissue".txt
+done
+
+##Check number of peaks
+wc -l analyses/peaks.analysis/peaks.outside.sigmoid_colon.txt #13251
+wc -l analyses/peaks.analysis/peaks.outside.stomach.txt #12431
+
+
+#Task 3: Focus on regulatory elements that are located on chromosome 1, and generate a file regulatory.elements.starts.tsv that contains the name of the regulatory region (i.e. the name of the original ATAC-seq peak) and the start (5') coordinate of the region.
+
+##Create directory for the results
+mkdir -m 777 analyses/chromosome_1_analysis
+
+##Filter for chromosome 1 and generate the required file
+> analyses/chromosome_1_analysis/regulatory.elements.starts.tsv
+for file in data/bed.files/*.bed
+do
+    grep "^chr1" "$file" | awk '{print $4, $2}' >> analyses/chromosome_1_analysis/regulatory.elements.starts.tsv
+done
+
+##Remove duplicates
+sort -u analyses/chromosome_1_analysis/regulatory.elements.starts.tsv > analyses/chromosome_1_analysis/regulatory.elements.starts.unique.tsv
+
+
+#Task 4: Focus on protein-coding genes located on chromosome 1. From the BED file of gene body coordinates (../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed), prepare a tab-separated file called gene.starts.tsv which will store the name of the gene in the first column, and the start coordinate of the gene on the second column (REMEMBER: for genes located on the minus strand, the start coordinate will be at the 3').
+
+grep "^chr1" ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed | \
+awk 'BEGIN{FS=OFS="\t"}{if ($6=="+"){start=$2} else {start=$3}; print $4, start}' > analyses/chromosome_1_analysis/gene.starts.tsv
+
+
+#Task 5: Download or copy this python script inside the epigenomics_uvic/bin folder.
+
+wget -P ../bin https://public-docs.crg.es/rguigo/Data/bborsari/UVIC/epigenomics_course/get.distance.py
+
+python ../bin/get.distance.py -h
+
+#This script takes as input two distinct arguments: 1) --input corresponds to the file gene.starts.tsv (i.e. the file you generated in Task #4); 2) --start corresponds to the 5' coordinate of a regulatory element. Complete the python script so that for a given coordinate --start the script returns the closest gene, the start of the gene and the distance of the regulatory element.
+
+##Modified script
+:<<'END'
+
+#!/usr/bin/env python
+
+#************
+# LIBRARIES *
+#************
+
+import sys
+from optparse import OptionParser
+
+#*****************
+# OPTION PARSING *
+#*****************
+
+parser = OptionParser()
+parser.add_option("-i", "--input", dest="input")
+parser.add_option("-s", "--start", dest="start")
+options, args = parser.parse_args()
+
+open_input = open(options.input)
+enhancer_start = int(options.start)
+
+#********
+# BEGIN *
+#********
+
+x = 1000000  # set maximum distance to 1 Mb
+selectedGene = ""  # initialize the gene as empty
+selectedGeneStart = 0  # initialize the start coordinate of the gene as 0
+
+for line in open_input.readlines():  # for each line in the input file
+    gene, position = line.strip().split('\t')  # split the line into two columns based on a tab
+    position = int(position)  # convert the start of the gene to an integer
+    distance = abs(position - enhancer_start)  # compute the absolute value of the difference between position and enhancer_start
+
+    if distance < x:  # if this absolute value is lower than x
+        x = distance  # this value will now be your current x
+        selectedGene = gene  # save gene as selectedGene
+        selectedGeneStart = position  # save position as selectedGeneStart
+
+print("\t".join([selectedGene, str(selectedGeneStart), str(x)]))
+
+END
+
+##Testing the script
+python ../bin/get.distance.py --input analyses/chromosome_1_analysis/gene.starts.tsv --start 980000
+
+
+#Task 6. For each regulatory element contained in the file regulatory.elements.starts.tsv, retrieve the closest gene and the distance to the closest gene using the python script you created above.
+
+cat analyses/chromosome_1_analysis/regulatory.elements.starts.unique.tsv | while read element start; do 
+    python ../bin/get.distance.py -i analyses/chromosome_1_analysis/gene.starts.tsv -s $start
+done > analyses/regulatoryElements.genes.distances.tsv
+
+
+#Task 7: Use R to compute the mean and the median of the distances stored in analyses/regulatoryElements.genes.distances.tsv
+
+nano ../bin/mean_median.R
+
+#Script inside mean_median.R
+:<<'END'
+
+args <- commandArgs(trailingOnly = TRUE)
+input_file <- args[1]
+
+data <- read.table(input_file, header=FALSE, sep="\t")
+distances <- data$V3
+mean_distance <- mean(distances, na.rm = TRUE)
+median_distance <- median(distances, na.rm = TRUE)
+
+cat("Mean distance: ", mean_distance, "\n")
+cat("Median distance: ", median_distance, "\n")
+
+END
+
+##Give it execution permission
+chmod +x ../bin/mean_median.R
+
+#Execute the R script
+Rscript ../bin/mean_median.R analyses/regulatoryElements.genes.distances.tsv
+
+###Mean distance: 10599.63 / Median distance: 3664
