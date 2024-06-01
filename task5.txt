@@ -9,6 +9,7 @@ sudo docker run -v $PWD:$PWD -w $PWD --rm -it dgarrimar/epigenomics_course
 mkdir -m 777 regulatory_elements
 mkdir -m 777 regulatory_elements/analyses
 
+cd regulatory_elements
 
 #Task 2: Distal regulatory regions are usually found to be flanked by both H3K27ac and H3K4me1. From your starting catalogue of open regions in each tissue, select those that overlap peaks of H3K27ac AND H3K4me1 in the corresponding tissue. You will get a list of candidate distal regulatory elements for each tissue. How many are they? 13251 for colon and 12431 for stomach.
 
@@ -16,20 +17,18 @@ mkdir -m 777 regulatory_elements/analyses
 for mod in H3K27ac H3K4me1 
 do
     echo $mod
-    grep -F $mod ATAC-seq/metadata.tsv | \
+    grep -F $mod ../ChIP-seq/metadata.tsv | \
     grep -F "bigBed_narrowPeak" | \
     grep -F "pseudoreplicated_peaks" | \
     grep -F "GRCh38" | \
-    awk 'BEGIN{FS=OFS="\t"}{print $1, $11, $23}' | \
+    awk 'BEGIN{FS=OFS="\t"}{print $1, $11}' | \
     sort -k2,2 -k1,1r | \
-    sort -k2,2 -u > regulatory_elements/analyses/bigBed.$mod.peaks.ids.txt
+    sort -k2,2 -u > analyses/bigBed.$mod.peaks.ids.txt
 done
 
-cd regulatory_elements
-
 mkdir -m 777 data
-mkdir -m 777 data/bigBed.files
-mkdir -m 777 data/bed.files
+mkdir -m 777 data/H3K27ac
+mkdir -m 777 data/H3K4me1
 mkdir -m 777 analyses/peaks.analysis
 
 for mod in H3K27ac H3K4me1
@@ -37,67 +36,67 @@ do
     cut -f1 analyses/bigBed.$mod.peaks.ids.txt | \
     while read filename; do
         echo $filename
-        wget -P data/bigBed.files "https://www.encodeproject.org/files/$filename/@@download/$filename.bigBed"
+        wget -P data/$mod "https://www.encodeproject.org/files/$filename/@@download/$filename.bigBed"
     done
 done
 
 ##check download integrity
-md5sum data/bigBed.files/*.bigBed
+for mod in H3K27ac H3K4me1
+do
+    echo $mod
 
-##Annotation file: ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed
+    ../bin/selectRows.sh <(cut -f1 analyses/bigBed.$mod.peaks.ids.txt) ../ChIP-seq/metadata.tsv | cut -f1,46 > data/$mod/md5sum.txt
 
-##Retrieve genes that fall outside gene coordinates
+    cat data/$mod/md5sum.txt | \
+    while read filename original_md5sum; do
+        md5sum data/$mod/"$filename".bigBed | \
+        awk -v filename="$filename" -v original_md5sum="$original_md5sum" 'BEGIN{FS=" ";OFS="\t"}{print filename, original_md5sum, $1}'
+    done > tmp
+
+    mv tmp data/$mod/md5sum.txt
+    awk '$2!=$3' data/$mod/md5sum.txt
+done
+
 ##Convert bigBed files into BED files
 for file in H3K27ac H3K4me1
 do
-    cut -f1 analyses/bigBed."$file".peaks.ids.txt | \
+    echo $file
+    cut -f1 analyses/bigBed.$file.peaks.ids.txt | \
     while read filename; do
-        bigBedToBed data/bigBed.files/"$filename".bigBed data/bed.files/"$filename".bed
+        bigBedToBed data/$file/"$filename".bigBed data/$file/"$filename".bed
     done
 done
 
-##Get peaks outside the body
-for file in H3K27ac H3K4me1
-do
-    cut -f-2 analyses/bigBed."$file".peaks.ids.txt | \
-    while read filename tissue; do 
-        bedtools intersect -a ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed -b data/bed.files/"$filename".bed | \
-        cut -f7 | \
-        sort -u > analyses/peaks.analysis/peaks.outside."$file"."$tissue".txt
-    done
+##Get overlapping genes between H3K27ac and H3K4me1 for each tissue (Sigmaoid_colon: 8627 / Stomach: 5148, 13775 in total)
+cut -f-2 analyses/bigBed.H3K27ac.peaks.ids.txt | \
+while read filename tissue; do
+    echo "$tissue"
+    bedtools intersect -a ../ATAC-seq/data/bed.files/ATAC_seq_peaks_outside_genes_"$tissue".bed -b data/H3K27ac/"$filename".bed -u > data/common_peaks_H3K27ac_"$tissue".bed
 done
 
-##Get overlapping genes between H3K27ac and H3K4me1 for each tissue
-for tissue in sigmoid_colon stomach
-do
-    ../bin/selectRows.sh analyses/peaks.analysis/peaks.outside.H3K4me1."$tissue".txt analyses/peaks.analysis/peaks.outside.H3K27ac."$tissue".txt | \
-    cut -d "." -f1 > analyses/peaks.analysis/peaks.outside."$tissue".txt
+cut -f-2 analyses/bigBed.H3K4me1.peaks.ids.txt | \
+while read filename tissue; do
+    echo "$tissue"
+    bedtools intersect -a data/common_peaks_H3K27ac_"$tissue".bed -b data/H3K4me1/"$filename".bed -u > data/common_peaks_H3K27ac_H3K4me1_"$tissue".bed
 done
 
-##Check number of peaks
-wc -l analyses/peaks.analysis/peaks.outside.sigmoid_colon.txt #13251
-wc -l analyses/peaks.analysis/peaks.outside.stomach.txt #12431
-
+wc -l data/common_peaks_H3K27ac_H3K4me1_*.bed
 
 #Task 3: Focus on regulatory elements that are located on chromosome 1, and generate a file regulatory.elements.starts.tsv that contains the name of the regulatory region (i.e. the name of the original ATAC-seq peak) and the start (5') coordinate of the region.
 
-##Create directory for the results
 mkdir -m 777 analyses/chromosome_1_analysis
+mkdir -m 777 analyses/chromosome_1_analysis/distances
 
-##Filter for chromosome 1 and generate the required file
-> analyses/chromosome_1_analysis/regulatory.elements.starts.tsv
-for file in data/bed.files/*.bed
+for tissue in sigmoid_colon stomach
 do
-    grep "^chr1" "$file" | awk '{print $4, $2}' >> analyses/chromosome_1_analysis/regulatory.elements.starts.tsv
+    echo $tissue
+    grep -w chr1 data/common_peaks_H3K27ac_H3K4me1_"$tissue".bed | \
+    awk 'BEGIN{FS=OFS="\t"}{print $4, $2}' > analyses/chromosome_1_analysis/regulatory.elements.starts."$tissue".tsv
 done
-
-##Remove duplicates
-sort -u analyses/chromosome_1_analysis/regulatory.elements.starts.tsv > analyses/chromosome_1_analysis/regulatory.elements.starts.unique.tsv
-
 
 #Task 4: Focus on protein-coding genes located on chromosome 1. From the BED file of gene body coordinates (../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed), prepare a tab-separated file called gene.starts.tsv which will store the name of the gene in the first column, and the start coordinate of the gene on the second column (REMEMBER: for genes located on the minus strand, the start coordinate will be at the 3').
 
-grep "^chr1" ../ATAC-seq/annotation/gencode.v24.protein.coding.gene.body.bed | \
+grep -w chr1 ../ChIP-seq/annotation/gencode.v24.protein.coding.gene.body.bed |
 awk 'BEGIN{FS=OFS="\t"}{if ($6=="+"){start=$2} else {start=$3}; print $4, start}' > analyses/chromosome_1_analysis/gene.starts.tsv
 
 
@@ -155,15 +154,21 @@ print("\t".join([selectedGene, str(selectedGeneStart), str(x)]))
 
 END
 
-##Testing the script
+##Testing the script. (Result: ENSG00000187642.9	982093	2093)
 python ../bin/get.distance.py --input analyses/chromosome_1_analysis/gene.starts.tsv --start 980000
 
 
 #Task 6. For each regulatory element contained in the file regulatory.elements.starts.tsv, retrieve the closest gene and the distance to the closest gene using the python script you created above.
 
-cat analyses/chromosome_1_analysis/regulatory.elements.starts.unique.tsv | while read element start; do 
-    python ../bin/get.distance.py -i analyses/chromosome_1_analysis/gene.starts.tsv -s $start
-done > analyses/regulatoryElements.genes.distances.tsv
+for tissue in sigmoid_colon stomach
+do
+    echo $tissue
+    cat analyses/chromosome_1_analysis/regulatory.elements.starts."$tissue".tsv | \
+    while read element start; do
+        python ../bin/get.distance.py --input analyses/chromosome_1_analysis/gene.starts.tsv --start $start
+    done > analyses/chromosome_1_analysis/distances/regulatoryElements.genes.distances."$tissue".tsv
+done
+
 
 
 #Task 7: Use R to compute the mean and the median of the distances stored in analyses/regulatoryElements.genes.distances.tsv
@@ -190,6 +195,9 @@ END
 chmod +x ../bin/mean_median.R
 
 #Execute the R script
-Rscript ../bin/mean_median.R analyses/regulatoryElements.genes.distances.tsv
+Rscript ../bin/mean_median.R analyses/chromosome_1_analysis/distances/regulatoryElements.genes.distances.sigmoid_colon.tsv
 
-###Mean distance: 10599.63 / Median distance: 3664
+Rscript ../bin/mean_median.R analyses/chromosome_1_analysis/distances/regulatoryElements.genes.distances.stomach.tsv
+
+### Sigmoid_colon. Mean distance: 73067.4 / Median distance: 36045
+### Stomach. Mean distance: 47013.77 / Median distance: 27773.5
