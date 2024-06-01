@@ -1,1 +1,1 @@
-This is only the exercises
+Repository for Epigenomics hands-on and docker + git exercises. 
